@@ -806,8 +806,8 @@ def get_stories_by_category(req: func.HttpRequest) -> func.HttpResponse:
                     status_code=200
                 )
         
-        blob_storage_base_url = os.environ.get("BlobStorageBaseUrl", "https://storiavoxstorage.blob.core.windows.net")
-        images_container = "storyImages"
+        connection_string = os.environ["AzureBlobStorageConnectionString"]
+        container_name = os.environ.get("StoryImagesContainerName", "storyimages")
         
         conn = pyodbc.connect(os.environ["SqlConnectionString"])
         cursor = conn.cursor()
@@ -864,6 +864,10 @@ def get_stories_by_category(req: func.HttpRequest) -> func.HttpResponse:
         stories = cursor.fetchall()
         result = []
         
+        from azure.storage.blob import BlobServiceClient
+        blob_service_client = BlobServiceClient.from_connection_string(connection_string)
+        container_client = blob_service_client.get_container_client(container_name)
+        
         for story in stories:
             story_id = story[0]
             category_query = '''
@@ -890,7 +894,9 @@ def get_stories_by_category(req: func.HttpRequest) -> func.HttpResponse:
                     "description": cat[2]
                 })
             
-            thumbnail_url = f"{blob_storage_base_url}/{images_container}/{story_id}_1.jpeg"
+            thumbnail_blob_name = f"{story_id}_1.jpeg"
+            thumbnail_blob_client = container_client.get_blob_client(thumbnail_blob_name)
+            thumbnail_url = thumbnail_blob_client.url
             
             story_obj = {
                 "id": story[0],
