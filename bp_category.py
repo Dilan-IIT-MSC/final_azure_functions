@@ -262,12 +262,41 @@ def get_categories(req: func.HttpRequest) -> func.HttpResponse:
         connection_string = os.environ["AzureBlobStorageConnectionString"]
         container_name = os.environ.get("CategoryImagesContainerName", "categories")
         
+        from azure.storage.blob import BlobServiceClient
         blob_service_client = BlobServiceClient.from_connection_string(connection_string)
         container_client = blob_service_client.get_container_client(container_name)
         
         categories_data = []
+        story_counts = {}
+        
         if categories:
             column_names = [column[0] for column in cursor.description]
+            
+            category_ids = []
+            for category in categories:
+                cat_id = category[0] 
+                category_ids.append(cat_id)
+            
+            if category_ids:
+                story_count_query = '''
+                SELECT 
+                    shc.category_id,
+                    COUNT(DISTINCT shc.story_id) as story_count
+                FROM 
+                    story_has_categories shc
+                INNER JOIN
+                    story s ON shc.story_id = s.id
+                WHERE 
+                    shc.category_id IN ({}) 
+                    AND s.status = 1
+                GROUP BY 
+                    shc.category_id
+                '''.format(','.join(['?'] * len(category_ids)))
+                
+                cursor.execute(story_count_query, category_ids)
+                for row in cursor.fetchall():
+                    story_counts[row[0]] = row[1]
+            
             for category in categories:
                 category_dict = {}
                 for i, column in enumerate(column_names):
@@ -278,7 +307,14 @@ def get_categories(req: func.HttpRequest) -> func.HttpResponse:
                 blob_client = container_client.get_blob_client(image_filename)
                 category_dict["imageURL"] = blob_client.url
                 
-                categories_data.append(category_dict)
+                story_count = story_counts.get(cat_id, 0)
+                
+                result_obj = {
+                    "category": category_dict,
+                    "storyCount": story_count
+                }
+                
+                categories_data.append(result_obj)
         
         return func.HttpResponse(
             body=json.dumps({
