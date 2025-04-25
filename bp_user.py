@@ -4,13 +4,13 @@
 # 
 # Please refer to https://aka.ms/azure-functions-python-blueprints
 
-
 import azure.functions as func
 import logging
 import json
 import pyodbc
 import os
 from datetime import datetime
+from azure.storage.blob import BlobServiceClient, ContentSettings
 
 bp_user = func.Blueprint()
 
@@ -163,7 +163,6 @@ def create_user(req: func.HttpRequest) -> func.HttpResponse:
                 status_code=200
             )
         
-        # Validate required fields
         required_fields = ['firstName', 'email', 'externalId']
         for field in required_fields:
             if field not in req_body:
@@ -176,7 +175,6 @@ def create_user(req: func.HttpRequest) -> func.HttpResponse:
                     status_code=200
                 )
         
-        # Validate firstName
         if not isinstance(req_body['firstName'], str):
             return func.HttpResponse(
                 body=json.dumps({
@@ -187,7 +185,6 @@ def create_user(req: func.HttpRequest) -> func.HttpResponse:
                 status_code=200
             )
         
-        # Validate email
         if not isinstance(req_body['email'], str):
             return func.HttpResponse(
                 body=json.dumps({
@@ -198,7 +195,6 @@ def create_user(req: func.HttpRequest) -> func.HttpResponse:
                 status_code=200
             )
         
-        # Validate externalId
         if not isinstance(req_body['externalId'], str):
             return func.HttpResponse(
                 body=json.dumps({
@@ -209,7 +205,6 @@ def create_user(req: func.HttpRequest) -> func.HttpResponse:
                 status_code=200
             )
             
-        # Validate lastName if provided
         if 'lastName' in req_body and req_body['lastName'] is not None:
             if not isinstance(req_body['lastName'], str):
                 return func.HttpResponse(
@@ -221,7 +216,6 @@ def create_user(req: func.HttpRequest) -> func.HttpResponse:
                     status_code=200
                 )
         
-        # Process birthday if provided
         date_for_sql = None
         if 'bday' in req_body and req_body['bday'] is not None:
             try:
@@ -261,7 +255,6 @@ def create_user(req: func.HttpRequest) -> func.HttpResponse:
         conn = pyodbc.connect(os.environ["SqlConnectionString"])
         cursor = conn.cursor()
         
-        # Check if email already exists
         cursor.execute('SELECT id FROM "user" WHERE email = ?', req_body['email'])
         existing_email = cursor.fetchone()
         if existing_email:
@@ -274,10 +267,9 @@ def create_user(req: func.HttpRequest) -> func.HttpResponse:
                 status_code=200
             )
         
-        # Check if externalId already exists
         cursor.execute('SELECT id FROM "user" WHERE externalId = ?', req_body['externalId'])
-        existing_externalId = cursor.fetchone()
-        if existing_externalId:
+        existing_external_id = cursor.fetchone()
+        if existing_external_id:
             return func.HttpResponse(
                 body=json.dumps({
                     "status": False,
@@ -339,7 +331,7 @@ def create_user(req: func.HttpRequest) -> func.HttpResponse:
         if 'conn' in locals():
             conn.close()
 
-#Update User            
+#Update User Details          
 @bp_user.route(route="user/{id}", methods=["PUT"])
 def update_user(req: func.HttpRequest) -> func.HttpResponse:
     try:
@@ -368,7 +360,7 @@ def update_user(req: func.HttpRequest) -> func.HttpResponse:
                 status_code=200
             )
         
-        valid_fields = ['firstName', 'lastName', 'bday', 'email', 'externalId']
+        valid_fields = ['firstName', 'lastName', 'bday', 'email', 'externalId', 'bio', 'profileImage']
         update_fields = [field for field in valid_fields if field in req_body]
         
         if not update_fields:
@@ -435,7 +427,7 @@ def update_user(req: func.HttpRequest) -> func.HttpResponse:
                     mimetype="application/json",
                     status_code=200
                 )
-            # Check if email is already used by another user
+
             cursor.execute('SELECT id FROM "user" WHERE email = ? AND id != ?', req_body['email'], user_id)
             existing_email = cursor.fetchone()
             if existing_email:
@@ -460,10 +452,10 @@ def update_user(req: func.HttpRequest) -> func.HttpResponse:
                     mimetype="application/json",
                     status_code=200
                 )
-            # Check if externalId is already used by another user
+
             cursor.execute('SELECT id FROM "user" WHERE externalId = ? AND id != ?', req_body['externalId'], user_id)
-            existing_externalId = cursor.fetchone()
-            if existing_externalId:
+            existing_external_id = cursor.fetchone()
+            if existing_external_id:
                 return func.HttpResponse(
                     body=json.dumps({
                         "status": False,
@@ -474,6 +466,32 @@ def update_user(req: func.HttpRequest) -> func.HttpResponse:
                 )
             update_parts.append("externalId = ?")
             parameters.append(req_body['externalId'])
+            
+        if 'bio' in req_body:
+            if req_body['bio'] is not None and not isinstance(req_body['bio'], str):
+                return func.HttpResponse(
+                    body=json.dumps({
+                        "status": False,
+                        "message": "bio must be a string or null"
+                    }),
+                    mimetype="application/json",
+                    status_code=200
+                )
+            update_parts.append("bio = ?")
+            parameters.append(req_body['bio'])
+            
+        if 'profileImage' in req_body:
+            if req_body['profileImage'] is not None and not isinstance(req_body['profileImage'], str):
+                return func.HttpResponse(
+                    body=json.dumps({
+                        "status": False,
+                        "message": "profileImage must be a string or null"
+                    }),
+                    mimetype="application/json",
+                    status_code=200
+                )
+            update_parts.append("profileImage = ?")
+            parameters.append(req_body['profileImage'])
             
         if 'bday' in req_body:
             if req_body['bday'] is None:
@@ -517,7 +535,6 @@ def update_user(req: func.HttpRequest) -> func.HttpResponse:
                         status_code=200
                     )
         
-        # Add updated timestamp
         update_parts.append("updated = ?")
         parameters.append(datetime.now())
         
@@ -544,6 +561,116 @@ def update_user(req: func.HttpRequest) -> func.HttpResponse:
         )
     except Exception as e:
         logging.error(f"Exception while updating user: {str(e)}")
+        return func.HttpResponse(
+            body=json.dumps({
+                "status": False,
+                "message": f"Internal server error: {str(e)}"
+            }),
+            mimetype="application/json",
+            status_code=200
+        )
+    finally:
+        if 'conn' in locals():
+            conn.close()
+
+# Upload Profile Image            
+@bp_user.route(route="user/{id}/profile-image", methods=["POST"])
+def upload_profile_image(req: func.HttpRequest) -> func.HttpResponse:
+    try:
+        user_id = req.route_params.get('id')
+        try:
+            user_id = int(user_id)
+        except ValueError:
+            return func.HttpResponse(
+                body=json.dumps({
+                    "status": False,
+                    "message": "Invalid user ID format"
+                }),
+                mimetype="application/json",
+                status_code=200
+            )
+        
+        if not req.files or 'image' not in req.files:
+            return func.HttpResponse(
+                body=json.dumps({
+                    "status": False,
+                    "message": "No image file provided"
+                }),
+                mimetype="application/json",
+                status_code=200
+            )
+        
+        image_file = req.files['image']
+        conn = pyodbc.connect(os.environ["SqlConnectionString"])
+        cursor = conn.cursor()
+        
+        cursor.execute('SELECT id FROM "user" WHERE id = ?', user_id)
+        user = cursor.fetchone()
+        if not user:
+            return func.HttpResponse(
+                body=json.dumps({
+                    "status": False,
+                    "message": "User not found"
+                }),
+                mimetype="application/json",
+                status_code=200
+            )
+        
+        try:
+            connection_string = os.environ["AzureBlobStorageConnectionString"]
+            container_name = os.environ["ProfileImagesContainerName"]
+            blob_service_client = BlobServiceClient.from_connection_string(connection_string)
+            container_client = blob_service_client.get_container_client(container_name)
+            
+            timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+            filename = f"profile/{user_id}/{timestamp}.jpg"
+            blob_client = container_client.get_blob_client(filename)
+            content_settings = ContentSettings(content_type="image/jpeg")
+            
+            blob_client.upload_blob(
+                image_file,
+                content_settings=content_settings,
+                overwrite=True
+            )
+            
+            profile_image_url = blob_client.url
+            
+            cursor.execute('''
+                UPDATE "user" 
+                SET profileImage = ?, updated = ?
+                WHERE id = ?
+            ''', profile_image_url, datetime.now(), user_id)
+            
+            conn.commit()
+            cursor.execute('SELECT * FROM "user" WHERE id = ?', user_id)
+            updated_user = cursor.fetchone()
+            
+            column_names = [column[0] for column in cursor.description]
+            user_data = format_user(updated_user, column_names)
+            
+            return func.HttpResponse(
+                body=json.dumps({
+                    "status": True,
+                    "message": "Profile image uploaded successfully",
+                    "user": user_data
+                }, default=str),
+                mimetype="application/json",
+                status_code=200
+            )
+            
+        except Exception as e:
+            logging.error(f"Blob storage error: {str(e)}")
+            return func.HttpResponse(
+                body=json.dumps({
+                    "status": False,
+                    "message": f"Error uploading to blob storage: {str(e)}"
+                }),
+                mimetype="application/json",
+                status_code=200
+            )
+        
+    except Exception as e:
+        logging.error(f"Exception while uploading profile image: {str(e)}")
         return func.HttpResponse(
             body=json.dumps({
                 "status": False,
@@ -599,7 +726,6 @@ def delete_user(req: func.HttpRequest) -> func.HttpResponse:
                 status_code=200
             )
         
-        # Update status to 0 and update timestamp
         cursor.execute('UPDATE "user" SET status = 0, updated = ? WHERE id = ?', datetime.now(), user_id)
         conn.commit()
         
