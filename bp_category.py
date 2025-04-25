@@ -11,6 +11,7 @@ import json
 import pyodbc
 import os
 from datetime import datetime
+from azure.storage.blob import BlobServiceClient
 
 bp_category = func.Blueprint()
 
@@ -258,6 +259,12 @@ def get_categories(req: func.HttpRequest) -> func.HttpResponse:
         cursor.execute(query, params)
         categories = cursor.fetchall()
         
+        connection_string = os.environ["AzureBlobStorageConnectionString"]
+        container_name = os.environ.get("CategoryImagesContainerName", "categories")
+        
+        blob_service_client = BlobServiceClient.from_connection_string(connection_string)
+        container_client = blob_service_client.get_container_client(container_name)
+        
         categories_data = []
         if categories:
             column_names = [column[0] for column in cursor.description]
@@ -265,6 +272,12 @@ def get_categories(req: func.HttpRequest) -> func.HttpResponse:
                 category_dict = {}
                 for i, column in enumerate(column_names):
                     category_dict[column] = category[i]
+                
+                cat_id = category_dict["id"]
+                image_filename = f"{cat_id}.jpeg"
+                blob_client = container_client.get_blob_client(image_filename)
+                category_dict["imageURL"] = blob_client.url
+                
                 categories_data.append(category_dict)
         
         return func.HttpResponse(
