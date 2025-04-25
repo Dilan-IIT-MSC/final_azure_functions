@@ -164,7 +164,7 @@ def create_user(req: func.HttpRequest) -> func.HttpResponse:
             )
         
         # Validate required fields
-        required_fields = ['firstName', 'email', 'external_id']
+        required_fields = ['firstName', 'email', 'externalId']
         for field in required_fields:
             if field not in req_body:
                 return func.HttpResponse(
@@ -198,12 +198,12 @@ def create_user(req: func.HttpRequest) -> func.HttpResponse:
                 status_code=200
             )
         
-        # Validate external_id
-        if not isinstance(req_body['external_id'], str):
+        # Validate externalId
+        if not isinstance(req_body['externalId'], str):
             return func.HttpResponse(
                 body=json.dumps({
                     "status": False,
-                    "message": "external_id must be a string"
+                    "message": "externalId must be a string"
                 }),
                 mimetype="application/json",
                 status_code=200
@@ -274,10 +274,10 @@ def create_user(req: func.HttpRequest) -> func.HttpResponse:
                 status_code=200
             )
         
-        # Check if external_id already exists
-        cursor.execute('SELECT id FROM "user" WHERE external_id = ?', req_body['external_id'])
-        existing_external_id = cursor.fetchone()
-        if existing_external_id:
+        # Check if externalId already exists
+        cursor.execute('SELECT id FROM "user" WHERE externalId = ?', req_body['externalId'])
+        existing_externalId = cursor.fetchone()
+        if existing_externalId:
             return func.HttpResponse(
                 body=json.dumps({
                     "status": False,
@@ -289,19 +289,19 @@ def create_user(req: func.HttpRequest) -> func.HttpResponse:
         
         lastName = req_body.get('lastName')
         email = req_body['email']
-        external_id = req_body['external_id']
+        externalId = req_body['externalId']
         current_time = datetime.now()
         
         insert_query = '''
             INSERT INTO "user" (
-                firstName, lastName, email, external_id, bday, status, created, updated
+                firstName, lastName, email, externalId, bday, status, created, updated
             ) VALUES (?, ?, ?, ?, ?, 1, ?, ?)
         '''
         cursor.execute(insert_query, 
                       req_body['firstName'], 
                       lastName, 
                       email, 
-                      external_id,
+                      externalId,
                       date_for_sql,
                       current_time,
                       current_time)
@@ -368,7 +368,7 @@ def update_user(req: func.HttpRequest) -> func.HttpResponse:
                 status_code=200
             )
         
-        valid_fields = ['firstName', 'lastName', 'bday', 'email', 'external_id']
+        valid_fields = ['firstName', 'lastName', 'bday', 'email', 'externalId']
         update_fields = [field for field in valid_fields if field in req_body]
         
         if not update_fields:
@@ -450,20 +450,20 @@ def update_user(req: func.HttpRequest) -> func.HttpResponse:
             update_parts.append("email = ?")
             parameters.append(req_body['email'])
             
-        if 'external_id' in req_body:
-            if not isinstance(req_body['external_id'], str):
+        if 'externalId' in req_body:
+            if not isinstance(req_body['externalId'], str):
                 return func.HttpResponse(
                     body=json.dumps({
                         "status": False,
-                        "message": "external_id must be a string"
+                        "message": "externalId must be a string"
                     }),
                     mimetype="application/json",
                     status_code=200
                 )
-            # Check if external_id is already used by another user
-            cursor.execute('SELECT id FROM "user" WHERE external_id = ? AND id != ?', req_body['external_id'], user_id)
-            existing_external_id = cursor.fetchone()
-            if existing_external_id:
+            # Check if externalId is already used by another user
+            cursor.execute('SELECT id FROM "user" WHERE externalId = ? AND id != ?', req_body['externalId'], user_id)
+            existing_externalId = cursor.fetchone()
+            if existing_externalId:
                 return func.HttpResponse(
                     body=json.dumps({
                         "status": False,
@@ -472,8 +472,8 @@ def update_user(req: func.HttpRequest) -> func.HttpResponse:
                     mimetype="application/json",
                     status_code=200
                 )
-            update_parts.append("external_id = ?")
-            parameters.append(req_body['external_id'])
+            update_parts.append("externalId = ?")
+            parameters.append(req_body['externalId'])
             
         if 'bday' in req_body:
             if req_body['bday'] is None:
