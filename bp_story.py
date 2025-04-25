@@ -635,7 +635,6 @@ def upload_story(req: func.HttpRequest) -> func.HttpResponse:
                 status_code=200
             )
         
-        # Validate we have an audio file
         if not req.files or 'audio' not in req.files:
             return func.HttpResponse(
                 body=json.dumps({
@@ -648,11 +647,9 @@ def upload_story(req: func.HttpRequest) -> func.HttpResponse:
         
         audio_file = req.files['audio']
         
-        # Connect to database
         conn = pyodbc.connect(os.environ["SqlConnectionString"])
         cursor = conn.cursor()
         
-        # Verify user exists
         cursor.execute('SELECT id FROM "user" WHERE id = ? AND status = 1', user_id)
         user = cursor.fetchone()
         if not user:
@@ -665,7 +662,6 @@ def upload_story(req: func.HttpRequest) -> func.HttpResponse:
                 status_code=200
             )
         
-        # Verify categories exist
         if categories:
             placeholders = ', '.join(['?' for _ in categories])
             query = f'SELECT id FROM "category" WHERE id IN ({placeholders}) AND status = 1'
@@ -692,53 +688,39 @@ def upload_story(req: func.HttpRequest) -> func.HttpResponse:
         cursor.execute("SELECT @@IDENTITY AS id")
         story_id = cursor.fetchone()[0]
         
-        # Insert categories
         for category_id in categories:
             cursor.execute('''
                 INSERT INTO "story_has_categories" (story_id, category_id)
                 VALUES (?, ?)
             ''', story_id, category_id)
         
-        # Generate a unique filename
         filename = f"{user_id}/{story_id}/{now.strftime('%Y%m%d%H%M%S')}.aac"
         
-        # Upload to blob storage
         try:
-            # Get connection string and container name from app settings
             connection_string = os.environ["AzureBlobStorageConnectionString"]
             container_name = os.environ["AudioStorageContainerName"]
-            
-            # Create blob service client
+
             blob_service_client = BlobServiceClient.from_connection_string(connection_string)
             container_client = blob_service_client.get_container_client(container_name)
-            
-            # Create blob client
             blob_client = container_client.get_blob_client(filename)
-            
-            # Set content type for AAC audio
             content_settings = ContentSettings(content_type="audio/aac")
             
-            # Upload the file
             blob_client.upload_blob(
                 audio_file,
                 content_settings=content_settings,
                 overwrite=True
             )
             
-            # Get the URL
             story_url = blob_client.url
             
-            # Update the story record with URL
             cursor.execute('''
                 UPDATE "story" 
                 SET story_url = ?
                 WHERE id = ?
             ''', story_url, story_id)
             
-            # Commit all transactions
             conn.commit()
             
-            # Return success with story ID and URL
             return func.HttpResponse(
                 body=json.dumps({
                     "status": True,
@@ -758,7 +740,6 @@ def upload_story(req: func.HttpRequest) -> func.HttpResponse:
             )
             
         except Exception as e:
-            # Rollback on error
             conn.rollback()
             logging.error(f"Blob storage error: {str(e)}")
             return func.HttpResponse(
@@ -772,6 +753,181 @@ def upload_story(req: func.HttpRequest) -> func.HttpResponse:
     
     except Exception as e:
         logging.error(f"Exception while uploading story: {str(e)}")
+        return func.HttpResponse(
+            body=json.dumps({
+                "status": False,
+                "message": f"Internal server error: {str(e)}"
+            }),
+            mimetype="application/json",
+            status_code=200
+        )
+    finally:
+        if 'conn' in locals():
+            conn.close()
+            
+@bp_story.route(route="stories/category/{id}", methods=["GET"])
+def get_stories_by_category(req: func.HttpRequest) -> func.HttpResponse:
+    try:
+        category_id = req.route_params.get('id')
+        try:
+            category_id = int(category_id)
+        except ValueError:
+            return func.HttpResponse(
+                body=json.dumps({
+                    "status": False,
+                    "message": "Invalid category ID format"
+                }),
+                mimetype="application/json",
+                status_code=200
+            )
+        
+        order = req.params.get('order', 'descending')
+        limit = req.params.get('limit')
+        
+        if limit:
+            try:
+                limit = int(limit)
+                if limit <= 0:
+                    return func.HttpResponse(
+                        body=json.dumps({
+                            "status": False,
+                            "message": "Limit must be a positive integer"
+                        }),
+                        mimetype="application/json",
+                        status_code=200
+                    )
+            except ValueError:
+                return func.HttpResponse(
+                    body=json.dumps({
+                        "status": False,
+                        "message": "Invalid limit format"
+                    }),
+                    mimetype="application/json",
+                    status_code=200
+                )
+        
+        blob_storage_base_url = os.environ.get("BlobStorageBaseUrl", "https://storiavoxstorage.blob.core.windows.net")
+        images_container = "storyImages"
+        
+        conn = pyodbc.connect(os.environ["SqlConnectionString"])
+        cursor = conn.cursor()
+        
+        cursor.execute('SELECT id, name FROM "category" WHERE id = ? AND status = 1', category_id)
+        category = cursor.fetchone()
+        
+        if not category:
+            return func.HttpResponse(
+                body=json.dumps({
+                    "status": False,
+                    "message": "Category not found or inactive"
+                }),
+                mimetype="application/json",
+                status_code=200
+            )
+        
+        base_query = '''
+        SELECT 
+            s.id,
+            s.title,
+            s.story_url,
+            s.gen_audio_url,
+            s.created,
+            s.duration,
+            s.listen_count,
+            u.id AS user_id,
+            u.firstName,
+            u.lastName,
+            (SELECT COUNT(*) FROM story_has_likes WHERE story_id = s.id AND status = 1) AS like_count
+        FROM 
+            story s
+        INNER JOIN 
+            "user" u ON s.user_id = u.id
+        INNER JOIN 
+            story_has_categories shc ON s.id = shc.story_id
+        WHERE 
+            s.status = 1
+            AND shc.category_id = ?
+        '''
+        
+        params = [category_id]
+        
+        order_direction = "DESC" if order.lower() == "descending" else "ASC"
+        base_query += f' ORDER BY s.created {order_direction}'
+        
+        if limit:
+            try:
+                base_query += f" FETCH FIRST {limit} ROWS ONLY"
+            except:
+                base_query = f"SELECT TOP {limit} " + base_query[7:]
+        
+        cursor.execute(base_query, params)
+        stories = cursor.fetchall()
+        result = []
+        
+        for story in stories:
+            story_id = story[0]
+            category_query = '''
+            SELECT 
+                c.id,
+                c.name,
+                c.description
+            FROM 
+                category c
+            INNER JOIN 
+                story_has_categories shc ON c.id = shc.category_id
+            WHERE 
+                shc.story_id = ? AND c.status = 1
+            '''
+            
+            cursor.execute(category_query, story_id)
+            categories = cursor.fetchall()
+            
+            category_list = []
+            for cat in categories:
+                category_list.append({
+                    "id": cat[0],
+                    "name": cat[1],
+                    "description": cat[2]
+                })
+            
+            thumbnail_url = f"{blob_storage_base_url}/{images_container}/{story_id}_1.jpeg"
+            
+            story_obj = {
+                "id": story[0],
+                "title": story[1],
+                "storyUrl": story[2],
+                "genAudioUrl": story[3],
+                "thumbnailUrl": thumbnail_url,
+                "created": format_date(story[4]) if story[4] else None,
+                "duration": format_time(story[5]) if story[5] else None,
+                "listenCount": story[6],
+                "author": {
+                    "id": story[7],
+                    "firstName": story[8],
+                    "lastName": story[9]
+                },
+                "categories": category_list,
+                "likeCount": story[10]
+            }
+            
+            result.append(story_obj)
+        
+        return func.HttpResponse(
+            body=json.dumps({
+                "status": True,
+                "message": "Stories retrieved successfully",
+                "category": {
+                    "id": category[0],
+                    "name": category[1]
+                },
+                "stories": result,
+                "count": len(result)
+            }, default=str),
+            mimetype="application/json",
+            status_code=200
+        )
+    except Exception as e:
+        logging.error(f"Exception while retrieving stories by category: {str(e)}")
         return func.HttpResponse(
             body=json.dumps({
                 "status": False,
