@@ -29,6 +29,56 @@ def format_user(user, column_names):
             user_data[column] = user[i]
     return user_data
 
+@bp_user.route(route="users/storytellers", methods=["GET"])
+def get_storytellers(req: func.HttpRequest) -> func.HttpResponse:
+    try:
+        conn = pyodbc.connect(os.environ["SqlConnectionString"])
+        cursor = conn.cursor()
+        
+        # Query to find users who have at least one story
+        query = '''
+        SELECT DISTINCT u.id, u.firstName, u.lastName 
+        FROM "user" u
+        INNER JOIN story s ON u.id = s.user_id
+        WHERE u.status = 1 AND s.status = 1
+        ORDER BY u.firstName, u.lastName
+        '''
+        
+        cursor.execute(query)
+        users = cursor.fetchall()
+        
+        users_data = []
+        for user in users:
+            users_data.append({
+                "id": user[0],
+                "firstName": user[1],
+                "lastName": user[2]
+            })
+        
+        return func.HttpResponse(
+            body=json.dumps({
+                "status": True,
+                "message": "Storytellers fetched successfully",
+                "authors": users_data,
+                "count": len(users_data)
+            }),
+            mimetype="application/json",
+            status_code=200
+        )
+    except Exception as e:
+        logging.error(f"Exception while getting storytellers: {str(e)}")
+        return func.HttpResponse(
+            body=json.dumps({
+                "status": False,
+                "message": f"Internal server error: {str(e)}"
+            }),
+            mimetype="application/json",
+            status_code=200
+        )
+    finally:
+        if 'conn' in locals():
+            conn.close()
+
 #Get User by ID
 @bp_user.route(route="user/{id}", methods=["GET"])
 def get_user(req: func.HttpRequest) -> func.HttpResponse:
