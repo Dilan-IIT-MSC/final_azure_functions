@@ -262,7 +262,6 @@ def get_categories(req: func.HttpRequest) -> func.HttpResponse:
         connection_string = os.environ["AzureBlobStorageConnectionString"]
         container_name = os.environ.get("CategoryImagesContainerName", "categories")
         
-        from azure.storage.blob import BlobServiceClient
         blob_service_client = BlobServiceClient.from_connection_string(connection_string)
         container_client = blob_service_client.get_container_client(container_name)
         
