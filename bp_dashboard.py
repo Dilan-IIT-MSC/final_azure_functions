@@ -115,6 +115,7 @@ def get_trending_stories(cursor, limit=5):
             s.gen_audio_url,
             s.created,
             s.duration,
+            s.listen_count,
             COUNT(DISTINCT uhls.id) * 2 AS listen_score,
             COUNT(DISTINCT shl.id) * 4 AS like_score,
             (COUNT(DISTINCT uhls.id) * 2 + COUNT(DISTINCT shl.id) * 4) AS total_score,
@@ -176,6 +177,8 @@ def get_trending_stories(cursor, limit=5):
                 "title": story[1],
                 "created": format_date(story[4]),
                 "duration": format_time(story[5]),
+                "listenCount": story[6],
+                "likeCount": 0,
                 "author": {
                     "id": story[9],
                     "firstName": story[10],
@@ -251,6 +254,7 @@ def get_most_recent_stories(cursor, limit=5):
                 "created": format_date(story[4]),
                 "duration": format_time(story[5]),
                 "listenCount": story[6],
+                "likeCount": 0,
                 "author": {
                     "id": story[7],
                     "firstName": story[8],
@@ -474,185 +478,176 @@ def get_recommended_stories(cursor, user_id, limit=2):
         return []
 
 def get_trending_categories(cursor, limit=4):
-    """Get trending categories based on recent listens and likes."""
+    """Retrieve trending categories based on recent listens and likes within the past 21 days."""
     cutoff_date = datetime.now() - timedelta(days=21)
-    
+
     try:
-        query = """
-        SELECT 
-            c.id,
-            c.name,
-            c.description,
-            c.icon,
-            COUNT(DISTINCT uhls.id) * 2 AS listen_score,
-            COUNT(DISTINCT shl.id) * 4 AS like_score,
-            COUNT(DISTINCT s.id) AS story_count,
-            (COUNT(DISTINCT uhls.id) * 2 + COUNT(DISTINCT shl.id) * 4) AS total_score
-        FROM 
-            category c
-        JOIN 
-            story_has_categories shc ON c.id = shc.category_id
-        JOIN 
-            story s ON shc.story_id = s.id
-        LEFT JOIN 
-            user_has_listen_stories uhls ON s.id = uhls.story_id 
-            AND uhls.listen_time > ?
-        LEFT JOIN 
-            story_has_likes shl ON s.id = shl.story_id 
-            AND shl.updated > ?
-            AND shl.status = 1
-        WHERE 
-            c.status = 1
-            AND s.status = 1
-        GROUP BY 
-            c.id, c.name, c.description, c.icon
-        HAVING
-            (COUNT(DISTINCT uhls.id) * 2 + COUNT(DISTINCT shl.id) * 4) > 0
-        ORDER BY 
-            total_score DESC
+        base_query = """
+            SELECT 
+                c.id,
+                c.name,
+                c.description,
+                c.icon,
+                COUNT(DISTINCT uhls.id) * 2 AS listen_score,
+                COUNT(DISTINCT shl.id) * 4 AS like_score,
+                COUNT(DISTINCT s.id) AS story_count,
+                (COUNT(DISTINCT uhls.id) * 2 + COUNT(DISTINCT shl.id) * 4) AS total_score
+            FROM 
+                category c
+            JOIN 
+                story_has_categories shc ON c.id = shc.category_id
+            JOIN 
+                story s ON shc.story_id = s.id
+            LEFT JOIN 
+                user_has_listen_stories uhls ON s.id = uhls.story_id 
+                AND uhls.listen_time > ?
+            LEFT JOIN 
+                story_has_likes shl ON s.id = shl.story_id 
+                AND shl.updated > ?
+                AND shl.status = 1
+            WHERE 
+                c.status = 1
+                AND s.status = 1
+            GROUP BY 
+                c.id, c.name, c.description, c.icon
+            HAVING
+                (COUNT(DISTINCT uhls.id) * 2 + COUNT(DISTINCT shl.id) * 4) > 0
+            ORDER BY 
+                total_score DESC
         """
         
-        query = f"SELECT TOP {limit} " + query.split("SELECT ")[1]
-        
+        query = f"SELECT TOP {limit} " + base_query.split("SELECT ")[1]
+
         cursor.execute(query, cutoff_date, cutoff_date)
         categories = cursor.fetchall()
-        
+        column_names = [column[0] for column in cursor.description]
+
+        if not categories:
+            return []
+
         connection_string = os.environ["AzureBlobStorageConnectionString"]
         container_name = os.environ.get("CategoryImagesContainerName", "categories")
-        
         blob_service_client = BlobServiceClient.from_connection_string(connection_string)
         container_client = blob_service_client.get_container_client(container_name)
         
-        result = []
+        categories_data = []
         for category in categories:
-            cursor.execute("""
-                SELECT TOP 1
-                    s.id, s.title
-                FROM 
-                    story s
-                JOIN 
-                    story_has_categories shc ON s.id = shc.story_id
-                WHERE 
-                    shc.category_id = ? 
-                    AND s.status = 1
-                ORDER BY
-                    s.created DESC
-            """, category[0])
-            
-            sample_story = cursor.fetchone()
-            
-            cat_id = category[0]
+            category_dict = {}
+            for i, column in enumerate(column_names):
+                category_dict[column] = category[i]
+
+            cat_id = category_dict["id"]
             image_filename = f"{cat_id}.jpeg"
             blob_client = container_client.get_blob_client(image_filename)
-            
-            category_obj = {
-                "id": category[0],
-                "name": category[1],
-                "description": category[2],
-                "icon": category[3],
-                "imageURL": blob_client.url,
-                "storyCount": int(category[6]) if category[6] else 0,
+            category_dict["imageURL"] = blob_client.url
+            story_count = int(category_dict.get("story_count", 0))
+
+            result_obj = {
+                "category": category_dict,
+                "storyCount": story_count
             }
-            
-            result.append(category_obj)
-            
-        return result
-    
+            categories_data.append(result_obj)
+
+        return categories_data
+
     except Exception as e:
         logging.error(f"Error in get_trending_categories: {str(e)}")
         return []
 
 def get_most_popular_categories(cursor, limit=4):
-    """Fallback method to get most popular categories when trending data is not available."""
+    """Fallback method to retrieve the most popular categories when trending data is unavailable."""
     try:
-        query = """
-        SELECT 
-            c.id,
-            c.name,
-            c.description,
-            c.icon,
-            COUNT(DISTINCT shc.story_id) AS story_count
-        FROM 
-            category c
-        JOIN 
-            story_has_categories shc ON c.id = shc.category_id
-        JOIN 
-            story s ON shc.story_id = s.id
-        WHERE 
-            c.status = 1
-            AND s.status = 1
-        GROUP BY 
-            c.id, c.name, c.description, c.icon
-        ORDER BY 
-            story_count DESC
-        """
-        
-        query = f"SELECT TOP {limit} " + query.split("SELECT ")[1]
-        
-        cursor.execute(query)
-        categories = cursor.fetchall()
-        
-        if not categories:
-            query = """
+        base_query = """
             SELECT 
                 c.id,
                 c.name,
                 c.description,
-                c.icon
+                c.icon,
+                COUNT(DISTINCT shc.story_id) AS story_count
             FROM 
                 category c
+            JOIN 
+                story_has_categories shc ON c.id = shc.category_id
+            JOIN 
+                story s ON shc.story_id = s.id
             WHERE 
                 c.status = 1
+                AND s.status = 1
+            GROUP BY 
+                c.id, c.name, c.description, c.icon
             ORDER BY 
-                c.name
+                story_count DESC
+        """
+        
+        query = f"SELECT TOP {limit} " + base_query.split("SELECT ")[1]
+        
+        cursor.execute(query)
+        categories = cursor.fetchall()
+        column_names = [column[0] for column in cursor.description]
+
+        if not categories:
+            fallback_query = """
+                SELECT 
+                    c.id,
+                    c.name,
+                    c.description,
+                    c.icon
+                FROM 
+                    category c
+                WHERE 
+                    c.status = 1
+                ORDER BY 
+                    c.name
             """
-            
-            query = f"SELECT TOP {limit} " + query.split("SELECT ")[1]
-            
+            query = f"SELECT TOP {limit} " + fallback_query.split("SELECT ")[1]
             cursor.execute(query)
             categories = cursor.fetchall()
+            column_names = [column[0] for column in cursor.description]
         
         connection_string = os.environ["AzureBlobStorageConnectionString"]
         container_name = os.environ.get("CategoryImagesContainerName", "categories")
-        
         blob_service_client = BlobServiceClient.from_connection_string(connection_string)
         container_client = blob_service_client.get_container_client(container_name)
-        
-        result = []
+
+        categories_data = []
+        story_counts = {}
+
         for category in categories:
-            cursor.execute("""
-                SELECT TOP 1
-                    s.id, s.title
-                FROM 
-                    story s
-                JOIN 
-                    story_has_categories shc ON s.id = shc.story_id
-                WHERE 
-                    shc.category_id = ? 
-                    AND s.status = 1
-                ORDER BY
-                    s.created DESC
-            """, category[0])
-            
-            sample_story = cursor.fetchone()
-            
             cat_id = category[0]
+            if len(category) > 4 and category[4] is not None:
+                story_counts[cat_id] = int(category[4])
+            else:
+                cursor.execute("""
+                    SELECT COUNT(DISTINCT s.id)
+                    FROM 
+                        story s
+                    JOIN 
+                        story_has_categories shc ON s.id = shc.story_id
+                    WHERE 
+                        shc.category_id = ?
+                        AND s.status = 1
+                """, cat_id)
+                count_result = cursor.fetchone()
+                story_counts[cat_id] = count_result[0] if count_result else 0
+
+        for category in categories:
+            category_dict = {}
+            for i, column in enumerate(column_names):
+                category_dict[column] = category[i]
+
+            cat_id = category_dict["id"]
             image_filename = f"{cat_id}.jpeg"
             blob_client = container_client.get_blob_client(image_filename)
-            
-            category_obj = {
-                "id": category[0],
-                "name": category[1],
-                "description": category[2],
-                "icon": category[3],
-                "imageURL": blob_client.url,
-                "storyCount": int(category[4]) if len(category) > 4 and category[4] else 0
+            category_dict["imageURL"] = blob_client.url
+
+            result_obj = {
+                "category": category_dict,
+                "storyCount": story_counts.get(cat_id, 0)
             }
-            
-            result.append(category_obj)
-            
-        return result
-        
+            categories_data.append(result_obj)
+
+        return categories_data
+
     except Exception as e:
         logging.error(f"Error in get_most_popular_categories: {str(e)}")
         return []
