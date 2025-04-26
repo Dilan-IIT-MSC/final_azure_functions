@@ -43,8 +43,10 @@ def get_stories(req: func.HttpRequest) -> func.HttpResponse:
         
         user_id = req_body.get('user_id')
         category_id = req_body.get('category_id')
-        order = req_body.get('order', 'ascending')
+        order = req_body.get('order', 'descending')
+        limit = req_body.get('limit')
         
+        # Validate user_id if provided
         if user_id is not None:
             try:
                 user_id = int(user_id)
@@ -57,7 +59,8 @@ def get_stories(req: func.HttpRequest) -> func.HttpResponse:
                     mimetype="application/json",
                     status_code=200
                 )
-                
+        
+        # Validate category_id if provided
         if category_id is not None:
             try:
                 category_id = int(category_id)
@@ -71,47 +74,131 @@ def get_stories(req: func.HttpRequest) -> func.HttpResponse:
                     status_code=200
                 )
         
+        # Validate limit if provided
+        if limit is not None:
+            try:
+                limit = int(limit)
+                if limit <= 0:
+                    return func.HttpResponse(
+                        body=json.dumps({
+                            "status": False,
+                            "message": "Limit must be a positive integer"
+                        }),
+                        mimetype="application/json",
+                        status_code=200
+                    )
+            except ValueError:
+                return func.HttpResponse(
+                    body=json.dumps({
+                        "status": False,
+                        "message": "Invalid limit format"
+                    }),
+                    mimetype="application/json",
+                    status_code=200
+                )
+        
+        # Get Azure Blob Storage information
+        connection_string = os.environ["AzureBlobStorageConnectionString"]
+        container_name = os.environ.get("StoryImagesContainerName", "storyImages")
+        
         conn = pyodbc.connect(os.environ["SqlConnectionString"])
         cursor = conn.cursor()
         
-        base_query = '''
-        SELECT 
-            s.id,
-            s.title,
-            s.created,
-            s.duration,
-            u.id AS user_id,
-            u.firstName,
-            u.lastName,
-            (SELECT COUNT(*) FROM story_has_likes WHERE story_id = s.id AND status = 1) AS like_count
-        FROM 
-            story s
-        INNER JOIN 
-            "user" u ON s.user_id = u.id
-        WHERE 
-            s.status = 1
-        '''
+        # Check if category exists if category_id is provided
+        category_info = None
+        if category_id is not None:
+            cursor.execute('SELECT id, name FROM "category" WHERE id = ? AND status = 1', category_id)
+            category_info = cursor.fetchone()
+            
+            if not category_info:
+                return func.HttpResponse(
+                    body=json.dumps({
+                        "status": False,
+                        "message": "Category not found or inactive"
+                    }),
+                    mimetype="application/json",
+                    status_code=200
+                )
         
+        # Build the base query
         params = []
         
-        if user_id is not None:
-            base_query += ' AND s.user_id = ?'
-            params.append(user_id)
-            
         if category_id is not None:
-            base_query = base_query.replace('WHERE s.status = 1', 
-                                           'INNER JOIN story_has_categories shc ON s.id = shc.story_id WHERE s.status = 1 AND shc.category_id = ?')
+            base_query = '''
+            SELECT 
+                s.id,
+                s.title,
+                s.created,
+                s.duration,
+                s.listen_count,
+                u.id AS user_id,
+                u.firstName,
+                u.lastName,
+                (SELECT COUNT(*) FROM story_has_likes WHERE story_id = s.id AND status = 1) AS like_count
+            FROM 
+                story s
+            INNER JOIN 
+                "user" u ON s.user_id = u.id
+            INNER JOIN 
+                story_has_categories shc ON s.id = shc.story_id
+            WHERE 
+                s.status = 1
+                AND shc.category_id = ?
+            '''
             params.append(category_id)
+        else:
+            base_query = '''
+            SELECT 
+                s.id,
+                s.title,
+                s.created,
+                s.duration,
+                s.listen_count,
+                u.id AS user_id,
+                u.firstName,
+                u.lastName,
+                (SELECT COUNT(*) FROM story_has_likes WHERE story_id = s.id AND status = 1) AS like_count
+            FROM 
+                story s
+            INNER JOIN 
+                "user" u ON s.user_id = u.id
+            WHERE 
+                s.status = 1
+            '''
         
+        # Add user filter if provided
+        if user_id is not None:
+            if "WHERE" in base_query:
+                base_query += ' AND s.user_id = ?'
+            else:
+                base_query += ' WHERE s.user_id = ?'
+            params.append(user_id)
+        
+        # Add ordering
         order_direction = "DESC" if order.lower() == "descending" else "ASC"
         base_query += f' ORDER BY s.created {order_direction}'
+        
+        # Add limit if specified
+        if limit is not None:
+            try:
+                base_query += f" FETCH FIRST {limit} ROWS ONLY"
+            except:
+                # Some versions of SQL Server might not support FETCH FIRST
+                base_query = base_query.replace("SELECT", f"SELECT TOP {limit}")
         
         cursor.execute(base_query, params)
         stories = cursor.fetchall()
         result = []
         
+        # Create a blob service client to get URLs
+        from azure.storage.blob import BlobServiceClient
+        blob_service_client = BlobServiceClient.from_connection_string(connection_string)
+        container_client = blob_service_client.get_container_client(container_name)
+        
         for story in stories:
             story_id = story[0]
+            
+            # Get all categories for this story
             category_query = '''
             SELECT 
                 c.id,
@@ -129,35 +216,67 @@ def get_stories(req: func.HttpRequest) -> func.HttpResponse:
             categories = cursor.fetchall()
             
             category_list = []
-            for category in categories:
+            for cat in categories:
                 category_list.append({
-                    "id": category[0],
-                    "name": category[1],
-                    "description": category[2]
+                    "id": cat[0],
+                    "name": cat[1],
+                    "description": cat[2]
                 })
+            
+            # Get the thumbnail URL for the first image of this story
+            thumbnail_blob_name = f"{story_id}_1.jpeg"
+            thumbnail_blob_client = container_client.get_blob_client(thumbnail_blob_name)
+            thumbnail_url = thumbnail_blob_client.url
+            
+            # Safely handle date/time formatting
+            created_date = None
+            if story[2]:  # index 2 is created date
+                if hasattr(story[2], 'strftime'):
+                    created_date = story[2].strftime('%Y-%m-%d')
+                else:
+                    created_date = str(story[2])
+            
+            duration_time = None
+            if story[3]:  # index 3 is duration
+                if hasattr(story[3], 'strftime'):
+                    duration_time = story[3].strftime('%H:%M:%S')
+                else:
+                    duration_time = str(story[3])
             
             story_obj = {
                 "id": story[0],
                 "title": story[1],
-                "created": format_date(story[2]),
-                "duration": format_time(story[3]),
+                "thumbnailUrl": thumbnail_url,
+                "created": created_date,
+                "duration": duration_time,
+                "listenCount": story[4],
                 "author": {
-                    "id": story[4],
-                    "firstName": story[5],
-                    "lastName": story[6]
+                    "id": story[5],
+                    "firstName": story[6],
+                    "lastName": story[7]
                 },
                 "categories": category_list,
-                "likeCount": story[7]
+                "likeCount": story[8]
             }
             
             result.append(story_obj)
         
+        response_data = {
+            "status": True,
+            "message": "Stories retrieved successfully",
+            "stories": result,
+            "count": len(result)
+        }
+        
+        # Add category info if filtering by category
+        if category_info:
+            response_data["category"] = {
+                "id": category_info[0],
+                "name": category_info[1]
+            }
+        
         return func.HttpResponse(
-            body=json.dumps({
-                "status": True,
-                "message": "Stories retrieved successfully",
-                "stories": result
-            }, default=str),
+            body=json.dumps(response_data, default=str),
             mimetype="application/json",
             status_code=200
         )
@@ -174,6 +293,7 @@ def get_stories(req: func.HttpRequest) -> func.HttpResponse:
     finally:
         if 'conn' in locals():
             conn.close()
+
                       
 @bp_story.route(route="story/{id}", methods=["GET"])
 def get_story_detail(req: func.HttpRequest) -> func.HttpResponse:
@@ -751,197 +871,6 @@ def upload_story(req: func.HttpRequest) -> func.HttpResponse:
     
     except Exception as e:
         logging.error(f"Exception while uploading story: {str(e)}")
-        return func.HttpResponse(
-            body=json.dumps({
-                "status": False,
-                "message": f"Internal server error: {str(e)}"
-            }),
-            mimetype="application/json",
-            status_code=200
-        )
-    finally:
-        if 'conn' in locals():
-            conn.close()
-            
-@bp_story.route(route="stories/category/{id}", methods=["GET"])
-def get_stories_by_category(req: func.HttpRequest) -> func.HttpResponse:
-    try:
-        category_id = req.route_params.get('id')
-        try:
-            category_id = int(category_id)
-        except ValueError:
-            return func.HttpResponse(
-                body=json.dumps({
-                    "status": False,
-                    "message": "Invalid category ID format"
-                }),
-                mimetype="application/json",
-                status_code=200
-            )
-        
-        order = req.params.get('order', 'descending')
-        limit = req.params.get('limit')
-        
-        if limit:
-            try:
-                limit = int(limit)
-                if limit <= 0:
-                    return func.HttpResponse(
-                        body=json.dumps({
-                            "status": False,
-                            "message": "Limit must be a positive integer"
-                        }),
-                        mimetype="application/json",
-                        status_code=200
-                    )
-            except ValueError:
-                return func.HttpResponse(
-                    body=json.dumps({
-                        "status": False,
-                        "message": "Invalid limit format"
-                    }),
-                    mimetype="application/json",
-                    status_code=200
-                )
-        
-        connection_string = os.environ["AzureBlobStorageConnectionString"]
-        container_name = os.environ.get("StoryImagesContainerName", "storyImages")
-        
-        conn = pyodbc.connect(os.environ["SqlConnectionString"])
-        cursor = conn.cursor()
-        
-        cursor.execute('SELECT id, name FROM "category" WHERE id = ? AND status = 1', category_id)
-        category = cursor.fetchone()
-        
-        if not category:
-            return func.HttpResponse(
-                body=json.dumps({
-                    "status": False,
-                    "message": "Category not found or inactive"
-                }),
-                mimetype="application/json",
-                status_code=200
-            )
-        
-        base_query = '''
-        SELECT 
-            s.id,
-            s.title,
-            s.created,
-            s.duration,
-            s.listen_count,
-            u.id AS user_id,
-            u.firstName,
-            u.lastName,
-            (SELECT COUNT(*) FROM story_has_likes WHERE story_id = s.id AND status = 1) AS like_count
-        FROM 
-            story s
-        INNER JOIN 
-            "user" u ON s.user_id = u.id
-        INNER JOIN 
-            story_has_categories shc ON s.id = shc.story_id
-        WHERE 
-            s.status = 1
-            AND shc.category_id = ?
-        '''
-        
-        params = [category_id]
-        
-        order_direction = "DESC" if order.lower() == "descending" else "ASC"
-        base_query += f' ORDER BY s.created {order_direction}'
-        
-        if limit:
-            try:
-                base_query += f" FETCH FIRST {limit} ROWS ONLY"
-            except:
-                base_query = f"SELECT TOP {limit} " + base_query[7:]
-        
-        cursor.execute(base_query, params)
-        stories = cursor.fetchall()
-        result = []
-        
-        from azure.storage.blob import BlobServiceClient
-        blob_service_client = BlobServiceClient.from_connection_string(connection_string)
-        container_client = blob_service_client.get_container_client(container_name)
-        
-        for story in stories:
-            story_id = story[0]
-            category_query = '''
-            SELECT 
-                c.id,
-                c.name,
-                c.description
-            FROM 
-                category c
-            INNER JOIN 
-                story_has_categories shc ON c.id = shc.category_id
-            WHERE 
-                shc.story_id = ? AND c.status = 1
-            '''
-            
-            cursor.execute(category_query, story_id)
-            categories = cursor.fetchall()
-            
-            category_list = []
-            for cat in categories:
-                category_list.append({
-                    "id": cat[0],
-                    "name": cat[1],
-                    "description": cat[2]
-                })
-            
-            thumbnail_blob_name = f"{story_id}_1.jpeg"
-            thumbnail_blob_client = container_client.get_blob_client(thumbnail_blob_name)
-            thumbnail_url = thumbnail_blob_client.url
-            
-            created_date = None
-            if story[2]:
-                if hasattr(story[2], 'strftime'):
-                    created_date = story[2].strftime('%Y-%m-%d')
-                else:
-                    created_date = str(story[2])
-            
-            duration_time = None
-            if story[3]:
-                if hasattr(story[3], 'strftime'):
-                    duration_time = story[3].strftime('%H:%M:%S')
-                else:
-                    duration_time = str(story[3])
-            
-            story_obj = {
-                "id": story[0],
-                "title": story[1],
-                "thumbnailUrl": thumbnail_url,
-                "created": created_date,
-                "duration": duration_time,
-                "listenCount": story[4],
-                "author": {
-                    "id": story[5],
-                    "firstName": story[6],
-                    "lastName": story[7]
-                },
-                "categories": category_list,
-                "likeCount": story[8]
-            }
-            
-            result.append(story_obj)
-        
-        return func.HttpResponse(
-            body=json.dumps({
-                "status": True,
-                "message": "Stories retrieved successfully",
-                "category": {
-                    "id": category[0],
-                    "name": category[1]
-                },
-                "stories": result,
-                "count": len(result)
-            }, default=str),
-            mimetype="application/json",
-            status_code=200
-        )
-    except Exception as e:
-        logging.error(f"Exception while retrieving stories by category: {str(e)}")
         return func.HttpResponse(
             body=json.dumps({
                 "status": False,
