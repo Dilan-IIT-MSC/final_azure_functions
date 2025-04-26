@@ -174,8 +174,7 @@ def get_stories(req: func.HttpRequest) -> func.HttpResponse:
     finally:
         if 'conn' in locals():
             conn.close()
-            
-            
+                      
 @bp_story.route(route="story/{id}", methods=["GET"])
 def get_story_detail(req: func.HttpRequest) -> func.HttpResponse:
     try:
@@ -401,7 +400,6 @@ def get_story_detail(req: func.HttpRequest) -> func.HttpResponse:
     finally:
         if 'conn' in locals():
             conn.close()
-
 
 @bp_story.route(route="story/like", methods=["POST"])
 def update_story_like(req: func.HttpRequest) -> func.HttpResponse:
@@ -807,7 +805,7 @@ def get_stories_by_category(req: func.HttpRequest) -> func.HttpResponse:
                 )
         
         connection_string = os.environ["AzureBlobStorageConnectionString"]
-        container_name = os.environ.get("StoryImagesContainerName", "storyimages")
+        container_name = os.environ.get("StoryImagesContainerName", "storyImages")
         
         conn = pyodbc.connect(os.environ["SqlConnectionString"])
         cursor = conn.cursor()
@@ -829,8 +827,6 @@ def get_stories_by_category(req: func.HttpRequest) -> func.HttpResponse:
         SELECT 
             s.id,
             s.title,
-            s.story_url,
-            s.gen_audio_url,
             s.created,
             s.duration,
             s.listen_count,
@@ -898,22 +894,34 @@ def get_stories_by_category(req: func.HttpRequest) -> func.HttpResponse:
             thumbnail_blob_client = container_client.get_blob_client(thumbnail_blob_name)
             thumbnail_url = thumbnail_blob_client.url
             
+            created_date = None
+            if story[2]:
+                if hasattr(story[2], 'strftime'):
+                    created_date = story[2].strftime('%Y-%m-%d')
+                else:
+                    created_date = str(story[2])
+            
+            duration_time = None
+            if story[3]:
+                if hasattr(story[3], 'strftime'):
+                    duration_time = story[3].strftime('%H:%M:%S')
+                else:
+                    duration_time = str(story[3])
+            
             story_obj = {
                 "id": story[0],
                 "title": story[1],
-                "storyUrl": story[2],
-                "genAudioUrl": story[3],
                 "thumbnailUrl": thumbnail_url,
-                "created": format_date(story[4]) if story[4] else None,
-                "duration": format_time(story[5]) if story[5] else None,
-                "listenCount": story[6],
+                "created": created_date,
+                "duration": duration_time,
+                "listenCount": story[4],
                 "author": {
-                    "id": story[7],
-                    "firstName": story[8],
-                    "lastName": story[9]
+                    "id": story[5],
+                    "firstName": story[6],
+                    "lastName": story[7]
                 },
                 "categories": category_list,
-                "likeCount": story[10]
+                "likeCount": story[8]
             }
             
             result.append(story_obj)
