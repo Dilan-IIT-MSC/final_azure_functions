@@ -475,11 +475,9 @@ def get_recommended_stories(cursor, user_id, limit=2):
 
 def get_trending_categories(cursor, limit=4):
     """Get trending categories based on recent listens and likes."""
-    # Define the cutoff date for recent activity (21 days ago)
     cutoff_date = datetime.now() - timedelta(days=21)
     
     try:
-        # Query to get trending categories
         query = """
         SELECT 
             c.id,
@@ -514,23 +512,19 @@ def get_trending_categories(cursor, limit=4):
             total_score DESC
         """
         
-        # For SQL Server, modify query to use TOP instead of LIMIT
         query = f"SELECT TOP {limit} " + query.split("SELECT ")[1]
         
         cursor.execute(query, cutoff_date, cutoff_date)
         categories = cursor.fetchall()
         
-        # Get Azure Blob Storage connection for category images
         connection_string = os.environ["AzureBlobStorageConnectionString"]
         container_name = os.environ.get("CategoryImagesContainerName", "categories")
         
         blob_service_client = BlobServiceClient.from_connection_string(connection_string)
         container_client = blob_service_client.get_container_client(container_name)
         
-        # Process and format the results
         result = []
         for category in categories:
-            # Get a sample story for this category
             cursor.execute("""
                 SELECT TOP 1
                     s.id, s.title
@@ -547,12 +541,10 @@ def get_trending_categories(cursor, limit=4):
             
             sample_story = cursor.fetchone()
             
-            # Get category image URL
             cat_id = category[0]
             image_filename = f"{cat_id}.jpeg"
             blob_client = container_client.get_blob_client(image_filename)
             
-            # Format the category data
             category_obj = {
                 "id": category[0],
                 "name": category[1],
@@ -573,7 +565,6 @@ def get_trending_categories(cursor, limit=4):
 def get_most_popular_categories(cursor, limit=4):
     """Fallback method to get most popular categories when trending data is not available."""
     try:
-        # Query to get categories with the most stories
         query = """
         SELECT 
             c.id,
@@ -596,13 +587,11 @@ def get_most_popular_categories(cursor, limit=4):
             story_count DESC
         """
         
-        # For SQL Server, modify query to use TOP instead of LIMIT
         query = f"SELECT TOP {limit} " + query.split("SELECT ")[1]
         
         cursor.execute(query)
         categories = cursor.fetchall()
         
-        # If no categories with stories, get all active categories
         if not categories:
             query = """
             SELECT 
@@ -618,23 +607,19 @@ def get_most_popular_categories(cursor, limit=4):
                 c.name
             """
             
-            # For SQL Server, modify query to use TOP instead of LIMIT
             query = f"SELECT TOP {limit} " + query.split("SELECT ")[1]
             
             cursor.execute(query)
             categories = cursor.fetchall()
         
-        # Get Azure Blob Storage connection for category images
         connection_string = os.environ["AzureBlobStorageConnectionString"]
         container_name = os.environ.get("CategoryImagesContainerName", "categories")
         
         blob_service_client = BlobServiceClient.from_connection_string(connection_string)
         container_client = blob_service_client.get_container_client(container_name)
         
-        # Process and format the results
         result = []
         for category in categories:
-            # Get a sample story for this category
             cursor.execute("""
                 SELECT TOP 1
                     s.id, s.title
@@ -651,12 +636,10 @@ def get_most_popular_categories(cursor, limit=4):
             
             sample_story = cursor.fetchone()
             
-            # Get category image URL
             cat_id = category[0]
             image_filename = f"{cat_id}.jpeg"
             blob_client = container_client.get_blob_client(image_filename)
             
-            # Format the category data
             category_obj = {
                 "id": category[0],
                 "name": category[1],
