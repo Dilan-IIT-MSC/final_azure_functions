@@ -6,4 +6,7 @@ azure-functions
 pyodbc
 python-dotenv
 azure-storage-blob
+azure-storage-queue
 openai
+ffmpeg-python
+pydub

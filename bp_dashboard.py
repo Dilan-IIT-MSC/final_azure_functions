@@ -42,38 +42,24 @@ def get_dashboard_data(req: func.HttpRequest) -> func.HttpResponse:
         except ValueError:
             req_body = {}
 
-        user_email = req_body.get('user_email')
-
-        user_id = None
-        conn = pyodbc.connect(os.environ["SqlConnectionString"])
-        cursor = conn.cursor()
-
-        if user_email:
+        user_id = req_body.get('user_id')
+        
+        if user_id is not None:
             try:
-                cursor.execute("SELECT id FROM [user] WHERE email = ? AND status = 1", user_email)
-                user_record = cursor.fetchone()
-                if user_record:
-                    user_id = user_record[0]
-                else:
-                    return func.HttpResponse(
-                        body=json.dumps({
-                            "status": False,
-                            "message": "User not found for the provided email"
-                        }),
-                        mimetype="application/json",
-                        status_code=200
-                    )
-            except Exception as e:
-                logging.error(f"Error fetching user_id for email {user_email}: {str(e)}")
+                user_id = int(user_id)
+            except ValueError:
                 return func.HttpResponse(
                     body=json.dumps({
                         "status": False,
-                        "message": f"Error retrieving user information: {str(e)}"
+                        "message": "Invalid user ID format"
                     }),
                     mimetype="application/json",
                     status_code=200
                 )
-                
+        
+        conn = pyodbc.connect(os.environ["SqlConnectionString"])
+        cursor = conn.cursor()
+        
         trending_stories = get_trending_stories(cursor, 5)
         if not trending_stories:
             trending_stories = get_most_recent_stories(cursor, 5)

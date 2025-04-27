@@ -34,8 +34,7 @@ def get_storytellers(req: func.HttpRequest) -> func.HttpResponse:
     try:
         conn = pyodbc.connect(os.environ["SqlConnectionString"])
         cursor = conn.cursor()
-        
-        # Query to find users who have at least one story
+
         query = '''
         SELECT DISTINCT u.id, u.firstName, u.lastName 
         FROM "user" u
@@ -410,7 +409,6 @@ def update_user(req: func.HttpRequest) -> func.HttpResponse:
                 status_code=200
             )
         
-        # Only allow updating lastName, bday, and bio
         valid_fields = ['lastName', 'bday', 'bio']
         update_fields = [field for field in valid_fields if field in req_body]
         
@@ -510,7 +508,6 @@ def update_user(req: func.HttpRequest) -> func.HttpResponse:
                         status_code=200
                     )
         
-        # Add updated timestamp
         update_parts.append("updated = ?")
         parameters.append(datetime.now())
         

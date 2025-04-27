@@ -5,15 +5,18 @@
 # Please refer to https://aka.ms/azure-functions-python-blueprints
 
 
-import threading
 import azure.functions as func
 import logging
 import json
 import pyodbc
 import os
+import tempfile
 from datetime import datetime
 from azure.storage.blob import BlobServiceClient, ContentSettings
-import requests
+from azure.storage.queue import QueueServiceClient
+from azure.storage.queue import QueueClient
+from bp_process_pipeline import bp_process_pipeline
+from pydub import AudioSegment
 
 bp_story = func.Blueprint()
 
@@ -48,7 +51,6 @@ def get_stories(req: func.HttpRequest) -> func.HttpResponse:
         order = req_body.get('order', 'descending')
         limit = req_body.get('limit')
         
-        # Validate user_id if provided
         if user_id is not None:
             try:
                 user_id = int(user_id)
@@ -62,7 +64,6 @@ def get_stories(req: func.HttpRequest) -> func.HttpResponse:
                     status_code=200
                 )
         
-        # Validate category_id if provided
         if category_id is not None:
             try:
                 category_id = int(category_id)
@@ -76,7 +77,6 @@ def get_stories(req: func.HttpRequest) -> func.HttpResponse:
                     status_code=200
                 )
         
-        # Validate limit if provided
         if limit is not None:
             try:
                 limit = int(limit)
@@ -99,14 +99,12 @@ def get_stories(req: func.HttpRequest) -> func.HttpResponse:
                     status_code=200
                 )
         
-        # Get Azure Blob Storage information
         connection_string = os.environ["AzureBlobStorageConnectionString"]
         container_name = os.environ.get("StoryImagesContainerName", "storyImages")
         
         conn = pyodbc.connect(os.environ["SqlConnectionString"])
         cursor = conn.cursor()
         
-        # Check if category exists if category_id is provided
         category_info = None
         if category_id is not None:
             cursor.execute('SELECT id, name FROM "category" WHERE id = ? AND status = 1', category_id)
@@ -122,7 +120,6 @@ def get_stories(req: func.HttpRequest) -> func.HttpResponse:
                     status_code=200
                 )
         
-        # Build the base query
         params = []
         
         if category_id is not None:
@@ -168,7 +165,6 @@ def get_stories(req: func.HttpRequest) -> func.HttpResponse:
                 s.status = 1
             '''
         
-        # Add user filter if provided
         if user_id is not None:
             if "WHERE" in base_query:
                 base_query += ' AND s.user_id = ?'
@@ -176,31 +172,26 @@ def get_stories(req: func.HttpRequest) -> func.HttpResponse:
                 base_query += ' WHERE s.user_id = ?'
             params.append(user_id)
         
-        # Add ordering
         order_direction = "DESC" if order.lower() == "descending" else "ASC"
         base_query += f' ORDER BY s.created {order_direction}'
         
-        # Add limit if specified
         if limit is not None:
             try:
                 base_query += f" FETCH FIRST {limit} ROWS ONLY"
             except:
-                # Some versions of SQL Server might not support FETCH FIRST
                 base_query = base_query.replace("SELECT", f"SELECT TOP {limit}")
         
         cursor.execute(base_query, params)
         stories = cursor.fetchall()
         result = []
         
-        # Create a blob service client to get URLs
         from azure.storage.blob import BlobServiceClient
         blob_service_client = BlobServiceClient.from_connection_string(connection_string)
         container_client = blob_service_client.get_container_client(container_name)
         
         for story in stories:
             story_id = story[0]
-            
-            # Get all categories for this story
+
             category_query = '''
             SELECT 
                 c.id,
@@ -225,21 +216,19 @@ def get_stories(req: func.HttpRequest) -> func.HttpResponse:
                     "description": cat[2]
                 })
             
-            # Get the thumbnail URL for the first image of this story
             thumbnail_blob_name = f"{story_id}_1.jpeg"
             thumbnail_blob_client = container_client.get_blob_client(thumbnail_blob_name)
             thumbnail_url = thumbnail_blob_client.url
             
-            # Safely handle date/time formatting
             created_date = None
-            if story[2]:  # index 2 is created date
+            if story[2]:
                 if hasattr(story[2], 'strftime'):
                     created_date = story[2].strftime('%Y-%m-%d')
                 else:
                     created_date = str(story[2])
             
             duration_time = None
-            if story[3]:  # index 3 is duration
+            if story[3]:
                 if hasattr(story[3], 'strftime'):
                     duration_time = story[3].strftime('%H:%M:%S')
                 else:
@@ -270,7 +259,6 @@ def get_stories(req: func.HttpRequest) -> func.HttpResponse:
             "count": len(result)
         }
         
-        # Add category info if filtering by category
         if category_info:
             response_data["category"] = {
                 "id": category_info[0],
@@ -295,8 +283,7 @@ def get_stories(req: func.HttpRequest) -> func.HttpResponse:
     finally:
         if 'conn' in locals():
             conn.close()
-
-                      
+                     
 @bp_story.route(route="story/{id}", methods=["GET"])
 def get_story_detail(req: func.HttpRequest) -> func.HttpResponse:
     try:
@@ -352,7 +339,6 @@ def get_story_detail(req: func.HttpRequest) -> func.HttpResponse:
                 status_code=200
             )
         
-        # Get categories for this story
         category_query = '''
         SELECT 
             c.id,
@@ -405,7 +391,6 @@ def get_story_detail(req: func.HttpRequest) -> func.HttpResponse:
                 "imageURL": timeline[3]
             })
         
-        # Get likes details for this story
         likes_query = '''
         SELECT 
             shl.id,
@@ -438,7 +423,6 @@ def get_story_detail(req: func.HttpRequest) -> func.HttpResponse:
                 "updated": format_date(like[4])
             })
         
-        # Get recent listeners
         listeners_query = '''
         SELECT 
             uhls.id,
@@ -707,7 +691,7 @@ def update_story_like(req: func.HttpRequest) -> func.HttpResponse:
         if 'conn' in locals():
             conn.close()
             
-@bp_process_pipeline.route(route="story/upload", methods=["POST"])
+@bp_story.route(route="story/upload", methods=["POST"])
 def upload_story(req: func.HttpRequest) -> func.HttpResponse:
     try:
         form = req.form
@@ -719,7 +703,7 @@ def upload_story(req: func.HttpRequest) -> func.HttpResponse:
             return func.HttpResponse(
                 body=json.dumps({"status": False, "message": "Missing required fields: user_id, title"}),
                 mimetype="application/json",
-                status_code=400
+                status_code=200 
             )
 
         try:
@@ -728,31 +712,32 @@ def upload_story(req: func.HttpRequest) -> func.HttpResponse:
             return func.HttpResponse(
                 body=json.dumps({"status": False, "message": "Invalid user ID format"}),
                 mimetype="application/json",
-                status_code=400
+                status_code=200
             )
 
         if not isinstance(categories, list):
             return func.HttpResponse(
                 body=json.dumps({"status": False, "message": "Categories must be an array"}),
                 mimetype="application/json",
-                status_code=400
+                status_code=200
             )
 
         if len(categories) > 3:
             return func.HttpResponse(
                 body=json.dumps({"status": False, "message": "Maximum 3 categories allowed"}),
                 mimetype="application/json",
-                status_code=400
+                status_code=200
             )
 
         if not req.files or 'audio' not in req.files:
             return func.HttpResponse(
                 body=json.dumps({"status": False, "message": "No audio file provided"}),
                 mimetype="application/json",
-                status_code=400
+                status_code=200 
             )
 
         audio_file = req.files['audio']
+        now = datetime.now()
 
         conn = pyodbc.connect(os.environ['SqlConnectionString'])
         cursor = conn.cursor()
@@ -763,7 +748,7 @@ def upload_story(req: func.HttpRequest) -> func.HttpResponse:
             return func.HttpResponse(
                 body=json.dumps({"status": False, "message": "User not found or inactive"}),
                 mimetype="application/json",
-                status_code=400
+                status_code=200 
             )
 
         if categories:
@@ -775,12 +760,10 @@ def upload_story(req: func.HttpRequest) -> func.HttpResponse:
                 return func.HttpResponse(
                     body=json.dumps({"status": False, "message": "One or more categories not found or inactive"}),
                     mimetype="application/json",
-                    status_code=400
+                    status_code=200
                 )
 
-        from datetime import datetime
         duration = "00:10:00"
-        now = datetime.now()
 
         cursor.execute('''
             INSERT INTO "story" (user_id, title, created, duration, listen_count, status)
@@ -790,13 +773,13 @@ def upload_story(req: func.HttpRequest) -> func.HttpResponse:
         cursor.execute("SELECT @@IDENTITY AS id")
         story_id = cursor.fetchone()[0]
 
+        filename = f"{user_id}/{story_id}/{now.strftime('%Y%m%d%H%M%S')}.mp3"
+
         for category_id in categories:
             cursor.execute('''
                 INSERT INTO "story_has_categories" (story_id, category_id)
                 VALUES (?, ?)
             ''', story_id, category_id)
-
-        filename = f"{user_id}/{story_id}/{now.strftime('%Y%m%d%H%M%S')}.aac"
 
         connection_string = os.environ['AzureBlobStorageConnectionString']
         container_name = os.environ['AudioStorageContainerName']
@@ -805,7 +788,6 @@ def upload_story(req: func.HttpRequest) -> func.HttpResponse:
         container_client = blob_service_client.get_container_client(container_name)
         blob_client = container_client.get_blob_client(filename)
 
-        from azure.storage.blob import ContentSettings
         content_settings = ContentSettings(content_type="audio/aac")
 
         blob_client.upload_blob(
@@ -824,31 +806,33 @@ def upload_story(req: func.HttpRequest) -> func.HttpResponse:
 
         conn.commit()
 
-        # Fire and Forget Processing
-        def trigger_processing(story_id):
-            try:
-                function_app_name = os.getenv("AZURE_FUNCTION_APP_NAME")
-                function_key = os.getenv("AZURE_FUNCTION_KEY")
-                processing_url = f"https://{function_app_name}.azurewebsites.net/api/story/process"
-                headers = {
-                    "Content-Type": "application/json",
-                    "x-functions-key": function_key
-                }
-                requests.post(
-                    processing_url,
-                    json={"story_id": story_id},
-                    headers=headers,
-                    timeout=5
-                )
-            except Exception as e:
-                logging.error(f"Failed to trigger story processing: {e}")
-
-        threading.Thread(target=trigger_processing, args=(story_id,)).start()
+        # # Queue the story for processing
+        # try:
+        #     queue_connection_string = os.environ.get("AzureBlobStorageConnectionString", "")
+        #     queue_name = os.environ.get("StoryProcessingQueueName", "story-processing-queue")
+            
+        #     # Create the queue if it doesn't exist
+        #     queue_client = QueueClient.from_connection_string(
+        #         conn_str=queue_connection_string, 
+        #         queue_name=queue_name
+        #     )
+            
+        #     # Prepare the message with the story ID
+        #     message = json.dumps({"story_id": story_id})
+            
+        #     # Send message to the queue
+        #     queue_client.send_message(message)
+            
+        #     logging.info(f"Story {story_id} queued for processing")
+        #     processing_status = "queued for processing"
+        # except Exception as queue_error:
+        #     logging.error(f"Failed to queue story for processing: {str(queue_error)}")
+        #     processing_status = "upload successful, but processing could not be queued"
 
         return func.HttpResponse(
             body=json.dumps({
                 "status": True,
-                "message": "Story uploaded and processing triggered successfully"
+                "message": f"Story uploaded successfully.",
             }, default=str),
             mimetype="application/json",
             status_code=200
@@ -859,7 +843,7 @@ def upload_story(req: func.HttpRequest) -> func.HttpResponse:
         return func.HttpResponse(
             body=json.dumps({"status": False, "message": f"Internal server error: {str(e)}"}),
             mimetype="application/json",
-            status_code=500
+            status_code=200
         )
 
     finally:
