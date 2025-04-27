@@ -5,6 +5,7 @@
 # Please refer to https://aka.ms/azure-functions-python-blueprints
 
 
+import threading
 import azure.functions as func
 import logging
 import json
@@ -12,6 +13,7 @@ import pyodbc
 import os
 from datetime import datetime
 from azure.storage.blob import BlobServiceClient, ContentSettings
+import requests
 
 bp_story = func.Blueprint()
 
@@ -381,9 +383,10 @@ def get_story_detail(req: func.HttpRequest) -> func.HttpResponse:
         SELECT 
             id,
             time,
-            color
+            color,
+            image_url
         FROM 
-            timeline_color
+            story_timeline_events
         WHERE 
             story_id = ?
         ORDER BY 
@@ -398,7 +401,8 @@ def get_story_detail(req: func.HttpRequest) -> func.HttpResponse:
             timeline_list.append({
                 "id": timeline[0],
                 "time": format_time(timeline[1]),
-                "color": timeline[2]
+                "color": timeline[2],
+                "imageURL": timeline[3]
             })
         
         # Get likes details for this story
@@ -703,83 +707,65 @@ def update_story_like(req: func.HttpRequest) -> func.HttpResponse:
         if 'conn' in locals():
             conn.close()
             
-@bp_story.route(route="story/upload", methods=["POST"])
+@bp_process_pipeline.route(route="story/upload", methods=["POST"])
 def upload_story(req: func.HttpRequest) -> func.HttpResponse:
     try:
         form = req.form
         user_id = form.get('user_id')
         title = form.get('title')
         categories = json.loads(form.get('categories', '[]'))
-        
+
         if not user_id or not title:
             return func.HttpResponse(
-                body=json.dumps({
-                    "status": False,
-                    "message": "Missing required fields: user_id, title"
-                }),
+                body=json.dumps({"status": False, "message": "Missing required fields: user_id, title"}),
                 mimetype="application/json",
-                status_code=200
+                status_code=400
             )
-        
+
         try:
             user_id = int(user_id)
         except ValueError:
             return func.HttpResponse(
-                body=json.dumps({
-                    "status": False,
-                    "message": "Invalid user ID format"
-                }),
+                body=json.dumps({"status": False, "message": "Invalid user ID format"}),
                 mimetype="application/json",
-                status_code=200
+                status_code=400
             )
-        
+
         if not isinstance(categories, list):
             return func.HttpResponse(
-                body=json.dumps({
-                    "status": False,
-                    "message": "Categories must be an array"
-                }),
+                body=json.dumps({"status": False, "message": "Categories must be an array"}),
                 mimetype="application/json",
-                status_code=200
+                status_code=400
             )
-        
+
         if len(categories) > 3:
             return func.HttpResponse(
-                body=json.dumps({
-                    "status": False,
-                    "message": "Maximum 3 categories allowed"
-                }),
+                body=json.dumps({"status": False, "message": "Maximum 3 categories allowed"}),
                 mimetype="application/json",
-                status_code=200
+                status_code=400
             )
-        
+
         if not req.files or 'audio' not in req.files:
             return func.HttpResponse(
-                body=json.dumps({
-                    "status": False,
-                    "message": "No audio file provided"
-                }),
+                body=json.dumps({"status": False, "message": "No audio file provided"}),
                 mimetype="application/json",
-                status_code=200
+                status_code=400
             )
-        
+
         audio_file = req.files['audio']
-        
-        conn = pyodbc.connect(os.environ["SqlConnectionString"])
+
+        conn = pyodbc.connect(os.environ['SqlConnectionString'])
         cursor = conn.cursor()
-        
+
         cursor.execute('SELECT id FROM "user" WHERE id = ? AND status = 1', user_id)
         user = cursor.fetchone()
         if not user:
             return func.HttpResponse(
-                body=json.dumps({
-                    "status": False,
-                    "message": "User not found or inactive"
-                }),
+                body=json.dumps({"status": False, "message": "User not found or inactive"}),
                 mimetype="application/json",
-                status_code=200
+                status_code=400
             )
-        
+
         if categories:
             placeholders = ', '.join(['?' for _ in categories])
             query = f'SELECT id FROM "category" WHERE id IN ({placeholders}) AND status = 1'
@@ -787,98 +773,95 @@ def upload_story(req: func.HttpRequest) -> func.HttpResponse:
             found_categories = cursor.fetchall()
             if len(found_categories) != len(categories):
                 return func.HttpResponse(
-                    body=json.dumps({
-                        "status": False,
-                        "message": "One or more categories not found or inactive"
-                    }),
+                    body=json.dumps({"status": False, "message": "One or more categories not found or inactive"}),
                     mimetype="application/json",
-                    status_code=200
+                    status_code=400
                 )
-        
+
+        from datetime import datetime
         duration = "00:10:00"
         now = datetime.now()
-        
+
         cursor.execute('''
             INSERT INTO "story" (user_id, title, created, duration, listen_count, status)
             VALUES (?, ?, ?, ?, ?, ?)
         ''', user_id, title, now, duration, 0, 1)
-        
+
         cursor.execute("SELECT @@IDENTITY AS id")
         story_id = cursor.fetchone()[0]
-        
+
         for category_id in categories:
             cursor.execute('''
                 INSERT INTO "story_has_categories" (story_id, category_id)
                 VALUES (?, ?)
             ''', story_id, category_id)
-        
-        filename = f"{user_id}/{story_id}/{now.strftime('%Y%m%d%H%M%S')}.aac"
-        
-        try:
-            connection_string = os.environ["AzureBlobStorageConnectionString"]
-            container_name = os.environ["AudioStorageContainerName"]
 
-            blob_service_client = BlobServiceClient.from_connection_string(connection_string)
-            container_client = blob_service_client.get_container_client(container_name)
-            blob_client = container_client.get_blob_client(filename)
-            content_settings = ContentSettings(content_type="audio/aac")
-            
-            blob_client.upload_blob(
-                audio_file,
-                content_settings=content_settings,
-                overwrite=True
-            )
-            
-            story_url = blob_client.url
-            
-            cursor.execute('''
-                UPDATE "story" 
-                SET story_url = ?
-                WHERE id = ?
-            ''', story_url, story_id)
-            
-            conn.commit()
-            
-            return func.HttpResponse(
-                body=json.dumps({
-                    "status": True,
-                    "message": "Story uploaded successfully",
-                    "story": {
-                        "id": story_id,
-                        "title": title,
-                        "user_id": user_id,
-                        "story_url": story_url,
-                        "created": now.strftime('%Y-%m-%d %H:%M:%S'),
-                        "duration": duration,
-                        "categories": categories
-                    }
-                }, default=str),
-                mimetype="application/json",
-                status_code=200
-            )
-            
-        except Exception as e:
-            conn.rollback()
-            logging.error(f"Blob storage error: {str(e)}")
-            return func.HttpResponse(
-                body=json.dumps({
-                    "status": False,
-                    "message": f"Error uploading to blob storage: {str(e)}"
-                }),
-                mimetype="application/json",
-                status_code=200
-            )
-    
-    except Exception as e:
-        logging.error(f"Exception while uploading story: {str(e)}")
+        filename = f"{user_id}/{story_id}/{now.strftime('%Y%m%d%H%M%S')}.aac"
+
+        connection_string = os.environ['AzureBlobStorageConnectionString']
+        container_name = os.environ['AudioStorageContainerName']
+
+        blob_service_client = BlobServiceClient.from_connection_string(connection_string)
+        container_client = blob_service_client.get_container_client(container_name)
+        blob_client = container_client.get_blob_client(filename)
+
+        from azure.storage.blob import ContentSettings
+        content_settings = ContentSettings(content_type="audio/aac")
+
+        blob_client.upload_blob(
+            audio_file,
+            content_settings=content_settings,
+            overwrite=True
+        )
+
+        story_url = blob_client.url
+
+        cursor.execute('''
+            UPDATE "story" 
+            SET story_url = ?
+            WHERE id = ?
+        ''', story_url, story_id)
+
+        conn.commit()
+
+        # Fire and Forget Processing
+        def trigger_processing(story_id):
+            try:
+                function_app_name = os.getenv("AZURE_FUNCTION_APP_NAME")
+                function_key = os.getenv("AZURE_FUNCTION_KEY")
+                processing_url = f"https://{function_app_name}.azurewebsites.net/api/story/process"
+                headers = {
+                    "Content-Type": "application/json",
+                    "x-functions-key": function_key
+                }
+                requests.post(
+                    processing_url,
+                    json={"story_id": story_id},
+                    headers=headers,
+                    timeout=5
+                )
+            except Exception as e:
+                logging.error(f"Failed to trigger story processing: {e}")
+
+        threading.Thread(target=trigger_processing, args=(story_id,)).start()
+
         return func.HttpResponse(
             body=json.dumps({
-                "status": False,
-                "message": f"Internal server error: {str(e)}"
-            }),
+                "status": True,
+                "message": "Story uploaded and processing triggered successfully"
+            }, default=str),
             mimetype="application/json",
             status_code=200
         )
+
+    except Exception as e:
+        logging.error(f"Exception while uploading story: {str(e)}")
+        return func.HttpResponse(
+            body=json.dumps({"status": False, "message": f"Internal server error: {str(e)}"}),
+            mimetype="application/json",
+            status_code=500
+        )
+
     finally:
         if 'conn' in locals():
             conn.close()

@@ -6,3 +6,4 @@ azure-functions
 pyodbc
 python-dotenv
 azure-storage-blob
+openai
