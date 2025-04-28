@@ -216,7 +216,7 @@ def get_stories(req: func.HttpRequest) -> func.HttpResponse:
                     "description": cat[2]
                 })
             
-            thumbnail_blob_name = f"{story_id}_1.jpeg"
+            thumbnail_blob_name = f"{story_id}/1.png"
             thumbnail_blob_client = container_client.get_blob_client(thumbnail_blob_name)
             thumbnail_url = thumbnail_blob_client.url
             
@@ -829,14 +829,14 @@ def upload_story(req: func.HttpRequest) -> func.HttpResponse:
         #     logging.error(f"Failed to queue story for processing: {str(queue_error)}")
         #     processing_status = "upload successful, but processing could not be queued"
 
-        return func.HttpResponse(
-            body=json.dumps({
-                "status": True,
-                "message": f"Story uploaded successfully.",
-            }, default=str),
-            mimetype="application/json",
-            status_code=200
-        )
+        # return func.HttpResponse(
+        #     body=json.dumps({
+        #         "status": True,
+        #         "message": f"Story uploaded successfully.",
+        #     }, default=str),
+        #     mimetype="application/json",
+        #     status_code=200
+        # )
 
     except Exception as e:
         logging.error(f"Exception while uploading story: {str(e)}")

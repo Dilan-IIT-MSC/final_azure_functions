@@ -148,6 +148,12 @@ def get_trending_stories(cursor, limit=5):
         cursor.execute(trending_query, cutoff_date, cutoff_date)
         stories = cursor.fetchall()
         
+        # Get the connection string and container name for thumbnails
+        connection_string = os.environ["AzureBlobStorageConnectionString"]
+        container_name = os.environ.get("StoryImagesContainerName", "storyImages")
+        blob_service_client = BlobServiceClient.from_connection_string(connection_string)
+        container_client = blob_service_client.get_container_client(container_name)
+        
         result = []
         for story in stories:
             cursor.execute("""
@@ -172,9 +178,15 @@ def get_trending_stories(cursor, limit=5):
                     "icon": category[3]
                 })
             
+            # Create thumbnail URL
+            thumbnail_blob_name = f"{story[0]}/1.png"
+            thumbnail_blob_client = container_client.get_blob_client(thumbnail_blob_name)
+            thumbnail_url = thumbnail_blob_client.url
+            
             story_obj = {
                 "id": story[0],
                 "title": story[1],
+                "thumbnailUrl": thumbnail_url,
                 "created": format_date(story[4]),
                 "duration": format_time(story[5]),
                 "listenCount": story[6],
@@ -224,6 +236,12 @@ def get_most_recent_stories(cursor, limit=5):
         cursor.execute(query)
         stories = cursor.fetchall()
         
+        # Get the connection string and container name for thumbnails
+        connection_string = os.environ["AzureBlobStorageConnectionString"]
+        container_name = os.environ.get("StoryImagesContainerName", "storyImages")
+        blob_service_client = BlobServiceClient.from_connection_string(connection_string)
+        container_client = blob_service_client.get_container_client(container_name)
+        
         result = []
         for story in stories:
             cursor.execute("""
@@ -248,9 +266,15 @@ def get_most_recent_stories(cursor, limit=5):
                     "icon": category[3]
                 })
             
+            # Create thumbnail URL
+            thumbnail_blob_name = f"{story[0]}/1.png"
+            thumbnail_blob_client = container_client.get_blob_client(thumbnail_blob_name)
+            thumbnail_url = thumbnail_blob_client.url
+            
             story_obj = {
                 "id": story[0],
                 "title": story[1],
+                "thumbnailUrl": thumbnail_url,
                 "created": format_date(story[4]),
                 "duration": format_time(story[5]),
                 "listenCount": story[6],
@@ -305,6 +329,12 @@ def get_recently_listened_stories(cursor, user_id, limit=2):
         cursor.execute(query, user_id)
         stories = cursor.fetchall()
         
+        # Get the connection string and container name for thumbnails
+        connection_string = os.environ["AzureBlobStorageConnectionString"]
+        container_name = os.environ.get("StoryImagesContainerName", "storyImages")
+        blob_service_client = BlobServiceClient.from_connection_string(connection_string)
+        container_client = blob_service_client.get_container_client(container_name)
+        
         result = []
         for story in stories:
             total_duration = story[3] 
@@ -332,10 +362,16 @@ def get_recently_listened_stories(cursor, user_id, limit=2):
                     "icon": category[3]
                 })
             
+            # Create thumbnail URL
+            thumbnail_blob_name = f"{story[0]}/1.png"
+            thumbnail_blob_client = container_client.get_blob_client(thumbnail_blob_name)
+            thumbnail_url = thumbnail_blob_client.url
+            
             story_obj = {
                 "id": story[0],
                 "title": story[1],
                 "storyUrl": story[2],
+                "thumbnailUrl": thumbnail_url,
                 "duration": format_time(story[3]),
                 "lastListenTime": format_date(story[4]),
                 "listenedDuration": format_time(story[5]),
